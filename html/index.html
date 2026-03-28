@@ -1,0 +1,133 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>AX_Farming</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Poppins:wght@300;400;600&family=Fugaz+One&display=swap" rel="stylesheet" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.0/css/all.min.css" />
+    <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+
+    <!-- ── PLANT HUD ───────────────────────────────────────── -->
+    <div id="farming-hud" class="hud-hidden">
+
+        <div class="hud-panel">
+
+            <!-- Header -->
+            <div class="hud-header">
+                <div class="hud-title-wrap">
+                    <i class="fa-solid fa-leaf hud-title-icon"></i>
+                    <span class="hud-title" id="plant-label">PLANTA</span>
+                </div>
+                <button class="hud-close" id="btn-close">
+                    <i class="fa-solid fa-xmark"></i>
+                </button>
+            </div>
+
+            <!-- Estado badge + Timer -->
+            <div class="hud-state-row">
+                <span class="state-badge" id="state-badge">
+                    <i class="fa-solid fa-circle-dot" id="state-icon"></i>
+                    <span id="state-label">Creciendo</span>
+                </span>
+                <div class="hud-timer" id="hud-timer">
+                    <i class="fa-solid fa-clock" id="timer-icon"></i>
+                    <span id="timer-label">TIEMPO</span>
+                    <span id="timer-value">--:--</span>
+                </div>
+            </div>
+
+            <!-- Barras de stats -->
+            <div class="hud-stats">
+
+                <div class="stat-row">
+                    <div class="stat-label">
+                        <i class="fa-solid fa-chart-simple"></i>
+                        <span>CRECIMIENTO</span>
+                    </div>
+                    <div class="stat-bar-wrap">
+                        <div class="stat-bar">
+                            <div class="stat-fill fill-growth" id="bar-growth"></div>
+                        </div>
+                        <span class="stat-value" id="val-growth">0%</span>
+                    </div>
+                </div>
+
+                <div class="stat-row">
+                    <div class="stat-label">
+                        <i class="fa-solid fa-droplet"></i>
+                        <span>AGUA</span>
+                    </div>
+                    <div class="stat-bar-wrap">
+                        <div class="stat-bar">
+                            <div class="stat-fill fill-water" id="bar-water"></div>
+                        </div>
+                        <span class="stat-value" id="val-water">0%</span>
+                    </div>
+                </div>
+
+                <div class="stat-row">
+                    <div class="stat-label">
+                        <i class="fa-solid fa-seedling"></i>
+                        <span>FERTILIZANTE</span>
+                    </div>
+                    <div class="stat-bar-wrap">
+                        <div class="stat-bar">
+                            <div class="stat-fill fill-fert" id="bar-fert"></div>
+                        </div>
+                        <span class="stat-value" id="val-fert">0%</span>
+                    </div>
+                </div>
+
+                <div class="stat-row">
+                    <div class="stat-label">
+                        <i class="fa-solid fa-heart-pulse"></i>
+                        <span>SALUD</span>
+                    </div>
+                    <div class="stat-bar-wrap">
+                        <div class="stat-bar">
+                            <div class="stat-fill fill-health" id="bar-health"></div>
+                        </div>
+                        <span class="stat-value" id="val-health">0%</span>
+                    </div>
+                </div>
+
+            </div>
+
+            <!-- Acciones -->
+            <div class="hud-actions" id="hud-actions">
+
+                <button class="action-btn btn-water" id="btn-water" data-action="waterPlant">
+                    <i class="fa-solid fa-droplet"></i>
+                    <span>REGAR</span>
+                </button>
+
+                <button class="action-btn btn-fert" id="btn-fert" data-action="fertilizePlant">
+                    <i class="fa-solid fa-seedling"></i>
+                    <span>FERTILIZAR</span>
+                </button>
+
+                <button class="action-btn btn-harvest" id="btn-harvest" data-action="harvestPlant">
+                    <i class="fa-solid fa-wheat-awn"></i>
+                    <span>COSECHAR</span>
+                </button>
+
+                <button class="action-btn btn-remove" id="btn-remove" data-action="removePlant">
+                    <i class="fa-solid fa-trash"></i>
+                    <span>ARRANCAR</span>
+                </button>
+
+            </div>
+
+            <!-- Toast de confirmación interna -->
+            <div class="hud-toast" id="hud-toast"></div>
+
+        </div>
+    </div>
+
+    <script src="script.js"></script>
+</body>
+</html>
