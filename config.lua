@@ -23,7 +23,7 @@ Config.FertilizerPerUse  = 75   -- Cuánto fertilizante da cada aplicación (0-1
 -- ─── DECAIMIENTO POR CICLO (cada UpdateInterval minutos) ────
 Config.WaterDecayPerCycle        = 15   -- Agua que baja por ciclo
 Config.FertilizerDecayPerCycle   = 10   -- Fertilizante que baja por ciclo
-Config.HealthDecayNoWater        = 10   -- Salud que pierde si agua = 0
+Config.HealthDecayNoWater        = 25   -- Salud que pierde si agua = 0 (por ciclo de UpdateInterval minutos)
 Config.GrowthBasePerCycle        = 8    -- Crecimiento base por ciclo
 Config.GrowthBonusFertilizer     = 5    -- Crecimiento extra si tiene fertilizante > 0
 Config.GrowthPenaltyLowWater     = 4    -- Reducción de crecimiento si agua < 20
