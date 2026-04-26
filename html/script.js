@@ -134,21 +134,21 @@ function updateStats(data) {
 
 function openMenu(data) {
     currentPlantId = data.plantId;
-
     plantLabel.textContent = (data.label || 'PLANTA').toUpperCase();
 
     updateStats({
-        growth:     data.growth,
-        water:      data.water,
-        fertilizer: data.fertilizer,
-        fertMax:    data.fertMax,
-        stage:      data.stage,
+        growth:        data.growth,
+        water:         data.water,
+        fertilizer:    data.fertilizer,
+        fertMax:       data.fertMax,
+        stage:         data.stage,
+        is_dead:       data.is_dead,
+        timeMode:      data.timeMode,
+        timeRemaining: data.timeRemaining,
     });
 
     overlay.classList.remove('hidden');
     plantMenu.classList.remove('hidden');
-
-    // Forzar reflow para que la transición funcione
     void plantMenu.offsetWidth;
     plantMenu.classList.add('open');
     plantMenu.classList.remove('closing');
@@ -290,15 +290,18 @@ window.addEventListener('message', (event) => {
             break;
 
         case 'updatePlant':
-            if (currentPlantId !== null) {
-                updateStats({
-                    growth:     data.growth,
-                    water:      data.water,
-                    fertilizer: data.fertilizer,
-                    stage:      data.stage,
-                    fertMax:    currentFertMax,
-                });
-            }
-            break;
+        if (currentPlantId !== null) {
+            updateStats({
+                growth:        data.growth,
+                water:         data.water,
+                fertilizer:    data.fertilizer,
+                stage:         data.stage,
+                fertMax:       currentFertMax,
+                is_dead:       data.is_dead,
+                timeMode:      data.timeMode,
+                timeRemaining: data.timeRemaining,
+            });
+        }
+        break;
     }
 });

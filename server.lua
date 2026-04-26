@@ -86,43 +86,48 @@ CreateThread(function()
             local cfg = Config.Plants[plant.plant_type]
             if cfg and not plant.is_dead then
 
-                -- Tiempo sin agua
                 local timeSinceWater = now - plant.last_water
 
                 if plant.growth >= 100 then
-                    -- Planta madura: verificar si se pudre por tiempo
-                    local timeSinceFullGrowth = now - plant.planted_at
-                    -- Calcular cuando llegó al 100% aproximadamente
-                    -- Usamos last_water como referencia de última actividad
                     local rotDeadline = plant.last_water + Config.RotTime
                     if now >= rotDeadline then
-                        -- Planta se pudre
-                        plant.is_dead   = true
-                        plant.growth    = 100
+                        plant.is_dead = true
                         MySQL.update('UPDATE ax_farming_plants SET is_dead=1 WHERE id=?', { id })
                         TriggerClientEvent('AX_Farming:client:updatePlant', -1, id, {
-                            growth     = plant.growth,
-                            water      = plant.water,
-                            fertilizer = plant.fertilizer,
-                            stage      = plant.stage,
-                            is_dead    = true,
+                            growth        = plant.growth,
+                            water         = plant.water,
+                            fertilizer    = plant.fertilizer,
+                            stage         = plant.stage,
+                            is_dead       = true,
+                            timeMode      = 'dead',
+                            timeRemaining = 0,
+                        })
+                    else
+                        TriggerClientEvent('AX_Farming:client:updatePlant', -1, id, {
+                            growth        = plant.growth,
+                            water         = plant.water,
+                            fertilizer    = plant.fertilizer,
+                            stage         = plant.stage,
+                            is_dead       = false,
+                            timeMode      = 'rot',
+                            timeRemaining = math.max(0, rotDeadline - now),
                         })
                     end
 
                 elseif plant.water <= 0 and timeSinceWater >= Config.DeathTime then
-                    -- Sin agua demasiado tiempo: se pudre
                     plant.is_dead = true
                     MySQL.update('UPDATE ax_farming_plants SET is_dead=1 WHERE id=?', { id })
                     TriggerClientEvent('AX_Farming:client:updatePlant', -1, id, {
-                        growth     = plant.growth,
-                        water      = plant.water,
-                        fertilizer = plant.fertilizer,
-                        stage      = plant.stage,
-                        is_dead    = true,
+                        growth        = plant.growth,
+                        water         = plant.water,
+                        fertilizer    = plant.fertilizer,
+                        stage         = plant.stage,
+                        is_dead       = true,
+                        timeMode      = 'dead',
+                        timeRemaining = 0,
                     })
 
                 else
-                    -- Crecimiento normal
                     if plant.growth < 100 then
                         local grow = cfg.passiveGrowth
                         if plant.water > 0 then
@@ -132,19 +137,35 @@ CreateThread(function()
                         plant.water  = math.max(0, plant.water - cfg.waterDecay)
                         plant.stage  = getStage(plant.growth)
 
-                        -- Al llegar al 100% guardar timestamp
                         if plant.growth >= 100 then
                             plant.last_water = now
                             MySQL.update('UPDATE ax_farming_plants SET last_water=? WHERE id=?', { now, id })
                         end
                     end
 
+                    local timeMode      = 'growth'
+                    local timeRemaining = 0
+
+                    if plant.growth >= 100 then
+                        timeMode      = 'rot'
+                        timeRemaining = math.max(0, (plant.last_water + Config.RotTime) - now)
+                    elseif plant.water <= 0 then
+                        timeMode      = 'death'
+                        timeRemaining = math.max(0, (plant.last_water + Config.DeathTime) - now)
+                    else
+                        local growPerTick = cfg.passiveGrowth + (cfg.waterGrowth * 0.1)
+                        local ticksLeft   = math.ceil((100 - plant.growth) / growPerTick)
+                        timeRemaining     = ticksLeft * (Config.GrowthInterval / 1000)
+                    end
+
                     TriggerClientEvent('AX_Farming:client:updatePlant', -1, id, {
-                        growth     = plant.growth,
-                        water      = plant.water,
-                        fertilizer = plant.fertilizer,
-                        stage      = plant.stage,
-                        is_dead    = false,
+                        growth        = plant.growth,
+                        water         = plant.water,
+                        fertilizer    = plant.fertilizer,
+                        stage         = plant.stage,
+                        is_dead       = false,
+                        timeMode      = timeMode,
+                        timeRemaining = timeRemaining,
                     })
                 end
             end

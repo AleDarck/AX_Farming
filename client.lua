@@ -162,14 +162,14 @@ RegisterNetEvent('AX_Farming:client:addPlant', function(plantData)
         fertilizer = plantData.fertilizer,
         stage      = plantData.stage,
         is_dead    = plantData.is_dead or false,
-        planted_at = plantData.planted_at or os.time(),
-        last_water = plantData.last_water or os.time(),
+        planted_at = plantData.planted_at or 0,
+        last_water = plantData.last_water or 0,
         obj        = nil,
     }
     local obj = spawnPropForPlant(Plants[id])
     Plants[id].obj = obj
     if obj then
-        registerTargetForPlant(plantId)
+        registerTargetForPlant(id)
     end
 end)
 
@@ -238,10 +238,9 @@ function openPlantMenu(plantId)
     NUIOpen        = true
     SetNuiFocus(true, true)
 
-    -- Calcular tiempo estimado
-    local now           = os.time()
+    local now           = math.floor(GetGameTimer() / 1000)
     local timeRemaining = 0
-    local timeMode      = 'growth' -- 'growth', 'death', 'rot'
+    local timeMode      = 'growth'
 
     if plant.is_dead then
         timeMode      = 'dead'
@@ -256,9 +255,7 @@ function openPlantMenu(plantId)
         timeRemaining = math.max(0, deathDeadline - now)
     else
         timeMode      = 'growth'
-        -- Estimar ticks restantes para llegar a 100%
-        local cfg2       = Config.Plants[plant.plant_type]
-        local growPerTick = cfg2.passiveGrowth + (cfg2.waterGrowth * 0.1)
+        local growPerTick = cfg.passiveGrowth + (cfg.waterGrowth * 0.1)
         local ticksLeft   = math.ceil((100 - plant.growth) / growPerTick)
         timeRemaining     = ticksLeft * (Config.GrowthInterval / 1000)
     end
@@ -424,30 +421,7 @@ end
 -- =============================================
 
 local function isOnDirt()
-    local playerPed = PlayerPedId()
-    local pos = GetEntityCoords(playerPed)
-
-    local rayHandle = StartShapeTestRay(
-        pos.x, pos.y, pos.z + 0.5,
-        pos.x, pos.y, pos.z - 2.0,
-        1, playerPed, 7
-    )
-
-    local timeout = 0
-    while timeout < 10 do
-        local status, hit, hitCoords, surfaceNormal, entityHit = GetShapeTestResult(rayHandle)
-        if status ~= 1 then
-            if hit == 1 and entityHit == 0 then
-                -- Verificar material del suelo
-                local materialHash = GetMaterialKeyForSurface(GetGroundMaterialAtCoords(hitCoords.x, hitCoords.y, hitCoords.z))
-                return true -- suelo nativo encontrado
-            end
-            return false
-        end
-        Wait(50)
-        timeout = timeout + 1
-    end
-    return false
+    return true
 end
 
 local function isNearOtherPlant(coords)
@@ -517,6 +491,8 @@ end
 -- Registrar uso de semillas
 AddEventHandler('onClientResourceStart', function(resourceName)
     if resourceName ~= GetCurrentResourceName() then return end
+
+    -- Registrar exports de semillas
     for seedItem, _ in pairs(Config.Plants) do
         local item = seedItem
         exports(item, function(data, slot)
@@ -527,6 +503,11 @@ AddEventHandler('onClientResourceStart', function(resourceName)
             end)
         end)
     end
+
+    -- Solicitar plantas al servidor
+    ESX.TriggerServerCallback('AX_Farming:getAllPlants', function(serverPlants)
+        TriggerEvent('AX_Farming:client:loadPlants', serverPlants)
+    end)
 end)
 
 RegisterNetEvent('AX_Farming:client:useSeed', function(seedItem)
