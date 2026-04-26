@@ -1,353 +1,559 @@
--- ============================================================
---  AX_Farming | client.lua
--- ============================================================
+-- =============================================
+--  AX_Farming - client.lua
+--  New ESX 1.13.4 | ox_target | ox_inventory | Lua 5.4
+-- =============================================
 
 local ESX = exports['es_extended']:getSharedObject()
 
-local spawnedProps   = {}
-local localPlants    = {}
-local hudOpen        = false
-local currentPlantId = nil
+-- =============================================
+--  ESTADO LOCAL
+-- =============================================
 
--- ── NOTIFY ───────────────────────────────────────────────────
-local function notify(msg, ntype)
-    ESX.ShowNotification(msg, ntype or 'info')
+local Plants          = {}        -- [id] = { datos + objeto }
+local NUIOpen         = false
+local CurrentPlantId  = nil
+local PlantingActive  = false
+
+-- =============================================
+--  HELPERS DE PROP
+-- =============================================
+
+local function getStage(growth)
+    if growth < 34 then return 1
+    elseif growth < 67 then return 2
+    else return 3 end
 end
 
--- ── STAGE / PROP ─────────────────────────────────────────────
-local function getStageFromGrowth(growth, state)
-    if state == 'dead' or state == 'rotten' then return 4 end
-    if growth >= 100 then return 4 end
-    if growth >= 60  then return 3 end
-    if growth >= 25  then return 2 end
-    return 1
-end
-
-local function getPropForPlant(plant)
-    local cfg = Config.Plants[plant.plantType]
+local function getPropModel(plant_type, stage)
+    local cfg = Config.Plants[plant_type]
     if not cfg then return nil end
-    return cfg.props['stage' .. getStageFromGrowth(plant.growth, plant.state)]
+    return cfg.props[stage] or cfg.props[1]
 end
 
--- ── PROGRESS BAR ─────────────────────────────────────────────
-local ANIMS = {
-    plant     = { dict = 'amb@world_human_gardener_plant@male@base', anim = 'base', flags = 1  },
-    water     = { dict = 'amb@world_human_drinking@base',            anim = 'base', flags = 1  },
-    fertilize = { dict = 'amb@world_human_gardener_plant@male@base', anim = 'base', flags = 49 },
-    harvest   = { dict = 'amb@world_human_gardener_plant@male@base', anim = 'base', flags = 1  },
-    remove    = { dict = 'amb@world_human_gardener_plant@male@base', anim = 'base', flags = 1  },
-}
+local function spawnPropForPlant(plantData)
+    local model = getPropModel(plantData.plant_type, plantData.stage)
+    if not model then return nil end
 
-local function doProgress(label, duration, animType)
-    local done     = false
-    local finished = false
-    local a        = ANIMS[animType] or ANIMS.plant
+    local hash = GetHashKey(model)
+    RequestModel(hash)
+    local timeout = 0
+    while not HasModelLoaded(hash) and timeout < 100 do
+        Wait(50)
+        timeout = timeout + 1
+    end
+    if not HasModelLoaded(hash) then return nil end
+
+    -- Buscar Z del suelo en la posición exacta
+    local groundZ = plantData.z
+    local found, gz = GetGroundZFor_3dCoord(plantData.x, plantData.y, plantData.z + 2.0, false)
+    if found then groundZ = gz end
+
+    local obj = CreateObject(hash, plantData.x, plantData.y, groundZ, false, false, true)
+    PlaceObjectOnGroundProperly(obj)
+    FreezeEntityPosition(obj, true)
+    SetModelAsNoLongerNeeded(hash)
+    return obj
+end
+
+local function deletePropForPlant(plantId)
+    local plant = Plants[plantId]
+    if plant and plant.obj and DoesEntityExist(plant.obj) then
+        DeleteEntity(plant.obj)
+        plant.obj = nil
+    end
+end
+
+-- =============================================
+--  OX_TARGET: registrar/eliminar opciones
+-- =============================================
+
+local function registerTargetForPlant(plantId)
+    local plant = Plants[plantId]
+    if not plant or not plant.obj then return end
+
+    exports.ox_target:addLocalEntity(plant.obj, {
+        {
+            name    = 'farming_inspect_' .. plantId,
+            label   = Config.TargetOptions.inspect.label,
+            icon    = Config.TargetOptions.inspect.icon,
+            distance = Config.TargetDistance,
+            onSelect = function()
+                openPlantMenu(plantId)
+            end,
+        },
+        {
+            name    = 'farming_destroy_' .. plantId,
+            label   = Config.TargetOptions.destroy.label,
+            icon    = Config.TargetOptions.destroy.icon,
+            distance = Config.TargetDistance,
+            onSelect = function()
+                destroyPlantAction(plantId)
+            end,
+        },
+    })
+end
+
+local function removeTargetForPlant(plantId)
+    local plant = Plants[plantId]
+    if plant and plant.obj and DoesEntityExist(plant.obj) then
+        exports.ox_target:removeLocalEntity(plant.obj, {
+            'farming_inspect_' .. plantId,
+            'farming_destroy_' .. plantId,
+        })
+    end
+end
+
+-- =============================================
+--  CARGAR PLANTAS AL INICIAR
+-- =============================================
+
+RegisterNetEvent('AX_Farming:client:loadPlants', function(serverPlants)
+    for id, _ in pairs(Plants) do
+        deletePropForPlant(id)
+    end
+    Plants = {}
+
+    CreateThread(function()
+        Wait(3000) -- esperar que el mundo cargue
+        for id, plantData in pairs(serverPlants) do
+            local numId = tonumber(id)
+            Plants[numId] = {
+                id         = numId,
+                plant_type = plantData.plant_type,
+                owner      = plantData.owner,
+                x          = plantData.x,
+                y          = plantData.y,
+                z          = plantData.z,
+                heading    = plantData.heading,
+                growth     = plantData.growth,
+                water      = plantData.water,
+                fertilizer = plantData.fertilizer,
+                stage      = plantData.stage,
+                is_dead    = plantData.is_dead or false,
+                planted_at = plantData.planted_at or 0,
+                last_water = plantData.last_water or 0,
+                obj        = nil,
+            }
+            local obj = spawnPropForPlant(Plants[numId])
+            Plants[numId].obj = obj
+            if obj then
+                registerTargetForPlant(numId)
+            end
+        end
+    end)
+end)
+
+-- =============================================
+--  AÑADIR PLANTA (nueva)
+-- =============================================
+
+RegisterNetEvent('AX_Farming:client:addPlant', function(plantData)
+    local id = plantData.id
+    Plants[id] = {
+        id         = id,
+        plant_type = plantData.plant_type,
+        owner      = plantData.owner,
+        x          = plantData.x,
+        y          = plantData.y,
+        z          = plantData.z,
+        heading    = plantData.heading,
+        growth     = plantData.growth,
+        water      = plantData.water,
+        fertilizer = plantData.fertilizer,
+        stage      = plantData.stage,
+        is_dead    = plantData.is_dead or false,
+        planted_at = plantData.planted_at or os.time(),
+        last_water = plantData.last_water or os.time(),
+        obj        = nil,
+    }
+    local obj = spawnPropForPlant(Plants[id])
+    Plants[id].obj = obj
+    if obj then
+        registerTargetForPlant(plantId)
+    end
+end)
+
+-- =============================================
+--  ACTUALIZAR PLANTA
+-- =============================================
+
+RegisterNetEvent('AX_Farming:client:updatePlant', function(plantId, data)
+    local plant = Plants[plantId]
+    if not plant then return end
+
+    local oldStage  = plant.stage
+    local wasDead   = plant.is_dead
+    plant.growth     = data.growth
+    plant.water      = data.water
+    plant.fertilizer = data.fertilizer
+    plant.stage      = data.stage
+    plant.is_dead    = data.is_dead
+
+    if oldStage ~= plant.stage then
+        removeTargetForPlant(plantId)
+        deletePropForPlant(plantId)
+        local obj = spawnPropForPlant(plant)
+        plant.obj = obj
+        if obj then
+            registerTargetForPlant(plantId)
+        end
+    end
+
+    if NUIOpen and CurrentPlantId == plantId then
+        SendNUIMessage({
+            type       = 'updatePlant',
+            growth     = plant.growth,
+            water      = plant.water,
+            fertilizer = plant.fertilizer,
+            stage      = plant.stage,
+            is_dead    = plant.is_dead,
+        })
+    end
+end)
+
+-- =============================================
+--  ELIMINAR PLANTA
+-- =============================================
+
+RegisterNetEvent('AX_Farming:client:removePlant', function(plantId)
+    if NUIOpen and CurrentPlantId == plantId then
+        closeNUI()
+    end
+    removeTargetForPlant(plantId)
+    deletePropForPlant(plantId)
+    Plants[plantId] = nil
+end)
+
+-- =============================================
+--  NUI
+-- =============================================
+
+function openPlantMenu(plantId)
+    local plant = Plants[plantId]
+    if not plant then return end
+    local cfg = Config.Plants[plant.plant_type]
+    if not cfg then return end
+
+    CurrentPlantId = plantId
+    NUIOpen        = true
+    SetNuiFocus(true, true)
+
+    -- Calcular tiempo estimado
+    local now           = os.time()
+    local timeRemaining = 0
+    local timeMode      = 'growth' -- 'growth', 'death', 'rot'
+
+    if plant.is_dead then
+        timeMode      = 'dead'
+        timeRemaining = 0
+    elseif plant.growth >= 100 then
+        timeMode      = 'rot'
+        local rotDeadline = plant.last_water + Config.RotTime
+        timeRemaining = math.max(0, rotDeadline - now)
+    elseif plant.water <= 0 then
+        timeMode      = 'death'
+        local deathDeadline = plant.last_water + Config.DeathTime
+        timeRemaining = math.max(0, deathDeadline - now)
+    else
+        timeMode      = 'growth'
+        -- Estimar ticks restantes para llegar a 100%
+        local cfg2       = Config.Plants[plant.plant_type]
+        local growPerTick = cfg2.passiveGrowth + (cfg2.waterGrowth * 0.1)
+        local ticksLeft   = math.ceil((100 - plant.growth) / growPerTick)
+        timeRemaining     = ticksLeft * (Config.GrowthInterval / 1000)
+    end
+
+    SendNUIMessage({
+        type          = 'open',
+        plantId       = plantId,
+        label         = cfg.label,
+        growth        = plant.growth,
+        water         = plant.water,
+        fertilizer    = plant.fertilizer,
+        fertMax       = cfg.fertMax,
+        waterMax      = cfg.waterMax,
+        stage         = plant.stage,
+        is_dead       = plant.is_dead,
+        timeRemaining = timeRemaining,
+        timeMode      = timeMode,
+    })
+end
+
+function closeNUI()
+    NUIOpen        = false
+    CurrentPlantId = nil
+    SetNuiFocus(false, false)
+    SendNUIMessage({ type = 'close' })
+end
+
+RegisterNUICallback('closeMenu', function(_, cb)
+    closeNUI()
+    cb('ok')
+end)
+
+-- =============================================
+--  ACCIONES DESDE NUI
+-- =============================================
+
+RegisterNUICallback('waterPlant', function(data, cb)
+    cb('ok')
+    closeNUI()
+    local plantId = tonumber(data.plantId)
+    local animCfg = Config.Animations.water
 
     exports['AX_ProgressBar']:Progress({
-        duration        = duration,
-        label           = label,
-        useWhileDead    = false,
-        canCancel       = true,
+        duration = animCfg.duration,
+        label    = animCfg.label,
+        useWhileDead   = false,
+        canCancel      = true,
         controlDisables = {
             disableMovement    = true,
             disableCarMovement = true,
             disableMouse       = false,
             disableCombat      = true,
         },
-        animation = { animDict = a.dict, anim = a.anim, flags = a.flags },
+        animation = {
+            animDict = animCfg.animDict,
+            anim     = animCfg.anim,
+            flags    = animCfg.flags,
+        },
     }, function(cancelled)
-        done     = not cancelled
-        finished = true
-    end)
-
-    while not finished do Wait(0) end
-    return done
-end
-
--- ── PROPS ────────────────────────────────────────────────────
-local function despawnProp(pid)
-    if spawnedProps[pid] then
-        DeleteObject(spawnedProps[pid])
-        spawnedProps[pid] = nil
-    end
-end
-
-local function spawnPlantProp(plant)
-    if plant.state == 'dead' then despawnProp(plant.id) return end
-
-    local propName = getPropForPlant(plant)
-    if not propName then return end
-
-    local hash = GetHashKey(propName)
-    if not IsModelValid(hash) then
-        print(('[AX_Farming] ^1Prop invalido: %s^0'):format(propName))
-        return
-    end
-
-    local existing = spawnedProps[plant.id]
-    if existing and DoesEntityExist(existing) then
-        if GetEntityModel(existing) == hash then return end
-        DeleteObject(existing)
-    end
-
-    lib.requestModel(hash)
-    local prop = CreateObjectNoOffset(hash, plant.x, plant.y, plant.z, false, false, false)
-    SetEntityCollision(prop, true, true)
-    FreezeEntityPosition(prop, true)
-    PlaceObjectOnGroundProperly(prop)
-    SetModelAsNoLongerNeeded(hash)
-    spawnedProps[plant.id] = prop
-end
-
--- ── OX_TARGET ────────────────────────────────────────────────
-local function addTargetToPlant(plant)
-    local handle = spawnedProps[plant.id]
-    if not handle or not DoesEntityExist(handle) then return end
-
-    exports.ox_target:removeLocalEntity(handle)
-
-    local pid = plant.id
-
-    exports.ox_target:addLocalEntity(handle, {
-        {
-            name     = 'inspect_' .. pid,
-            label    = Config.TargetOptions.inspect.label,
-            icon     = Config.TargetOptions.inspect.icon,
-            onSelect = function()
-                CreateThread(function() openHUD(pid) end)
-            end,
-        },
-        {
-            name     = 'remove_' .. pid,
-            label    = Config.TargetOptions.remove.label,
-            icon     = Config.TargetOptions.remove.icon,
-            onSelect = function()
-                CreateThread(function() doRemove(pid) end)
-            end,
-        },
-    })
-end
-
--- ── SYNC ─────────────────────────────────────────────────────
-local function syncPlants(serverPlants)
-    for id in pairs(spawnedProps) do
-        if not serverPlants[id] then
-            exports.ox_target:removeLocalEntity(spawnedProps[id])
-            despawnProp(id)
-        end
-    end
-
-    localPlants = serverPlants
-
-    for id, plant in pairs(serverPlants) do
-        plant.id = id
-        if plant.state ~= 'dead' then
-            spawnPlantProp(plant)
-            Wait(100)
-            addTargetToPlant(plant)
-        end
-    end
-
-    -- Si el HUD está abierto actualizar datos en pantalla
-    if hudOpen and currentPlantId and localPlants[currentPlantId] then
-        SendNUIMessage({ action = 'updatePlant', plant = localPlants[currentPlantId] })
-    end
-end
-
--- ── HUD ──────────────────────────────────────────────────────
-function openHUD(plantId)
-    local plant = localPlants[plantId]
-    if not plant then
-        local fresh = lib.callback.await('AX_Farming:getPlantData', false, plantId)
-        if not fresh then notify('No se puede obtener informacion de la planta') return end
-        fresh.id = plantId
-        plant = fresh
-    end
-    currentPlantId = plantId
-    hudOpen        = true
-    SetNuiFocus(true, true)
-    SendNUIMessage({ action = 'openHUD', plant = plant })
-end
-
-function closeHUD()
-    hudOpen        = false
-    currentPlantId = nil
-    SetNuiFocus(false, false)
-    SendNUIMessage({ action = 'closeHUD' })
-end
-
--- ── ACCIONES ─────────────────────────────────────────────────
--- Patrón para acciones desde el HUD:
---   1. Cerrar foco NUI para que el juego reciba input (animación/progressbar)
---   2. Ejecutar progressbar
---   3. Llamar al servidor
---   4. El servidor manda syncAllPlants → el NUI recibe updatePlant automáticamente
--- No hay que reabrir el HUD manualmente: el HUD sigue visible en pantalla,
--- solo perdió el foco. Al terminar la acción, devolvemos el foco.
-
-local function runHUDAction(progressLabel, duration, animType, callback)
-    -- 1. Quitar foco para que la animación funcione
-    SetNuiFocus(false, false)
-
-    -- 2. Progressbar
-    local done = doProgress(progressLabel, duration, animType)
-
-    -- 3. Ejecutar acción si no canceló
-    if done then
-        callback()
-    end
-
-    -- 4. Devolver foco al HUD si sigue abierto
-    if hudOpen then
-        SetNuiFocus(true, true)
-    end
-end
-
-function doWater(plantId)
-    runHUDAction('Regando planta...', 4000, 'water', function()
-        local ok, result = lib.callback.await('AX_Farming:waterPlant', false, plantId)
-        if ok then
-            notify('Has regado la planta')
-        else
-            notify(result or 'No puedes regar esta planta', 'error')
+        if not cancelled then
+            TriggerServerEvent('AX_Farming:server:waterPlant', plantId)
         end
     end)
-end
-
-function doFertilize(plantId)
-    runHUDAction('Fertilizando planta...', 5000, 'fertilize', function()
-        local ok, result = lib.callback.await('AX_Farming:fertilizePlant', false, plantId)
-        if ok then
-            notify('Has fertilizado la planta')
-        else
-            notify(result or 'No puedes fertilizar esta planta', 'error')
-        end
-    end)
-end
-
-function doHarvest(plantId)
-    runHUDAction('Cosechando planta...', 6000, 'harvest', function()
-        local ok, result = lib.callback.await('AX_Farming:harvestPlant', false, plantId)
-        if ok then
-            notify(('Has cosechado %d %s'):format(result.amount, result.label))
-            closeHUD()
-        else
-            notify(result or 'No puedes cosechar esta planta', 'error')
-        end
-    end)
-end
-
-function doRemove(plantId)
-    -- El arrancar puede venir del target (sin HUD abierto) o del HUD
-    local fromHUD = hudOpen
-    if fromHUD then SetNuiFocus(false, false) end
-
-    local done = doProgress('Arrancando planta...', 3000, 'remove')
-    if done then
-        local ok, err = lib.callback.await('AX_Farming:removePlant', false, plantId)
-        if ok then
-            notify('Has arrancado la planta')
-            if fromHUD then closeHUD() end
-        else
-            notify(err or 'No puedes arrancar esta planta', 'error')
-            if fromHUD then SetNuiFocus(true, true) end
-        end
-    else
-        if fromHUD then SetNuiFocus(true, true) end
-    end
-end
-
--- ── PLANTAR ──────────────────────────────────────────────────
-RegisterNetEvent('AX_Farming:useSeed', function(plantType)
-    local ped    = PlayerPedId()
-    local coords = GetEntityCoords(ped)
-
-    local ray = StartShapeTestRay(coords.x, coords.y, coords.z, coords.x, coords.y, coords.z - 3.0, 1, ped, 0)
-    local _, hit = GetShapeTestResult(ray)
-    if not hit then
-        notify('No puedes plantar aqui, necesitas suelo de tierra', 'error')
-        return
-    end
-
-    for _, p in pairs(localPlants) do
-        if #(coords - vector3(p.x, p.y, p.z)) < Config.MinDistanceBetween then
-            notify('Demasiado cerca de otra planta', 'error')
-            return
-        end
-    end
-
-    local done = doProgress('Plantando semilla...', 5000, 'plant')
-    if not done then return end
-
-    coords = GetEntityCoords(ped)
-    local ok, result = lib.callback.await('AX_Farming:plantSeed', false, plantType, {
-        x = coords.x, y = coords.y, z = coords.z
-    })
-    if ok then
-        notify('Has plantado la semilla')
-    else
-        notify(result or 'No se pudo plantar la semilla', 'error')
-    end
-end)
-
--- ── EVENTOS ──────────────────────────────────────────────────
-RegisterNetEvent('AX_Farming:syncAllPlants', function(serverPlants)
-    syncPlants(serverPlants)
-end)
-
-RegisterNetEvent('AX_Farming:removePlant', function(plantId)
-    if hudOpen and currentPlantId == plantId then closeHUD() end
-    if spawnedProps[plantId] then
-        exports.ox_target:removeLocalEntity(spawnedProps[plantId])
-    end
-    despawnProp(plantId)
-    localPlants[plantId] = nil
-end)
-
--- ── NUI CALLBACKS ────────────────────────────────────────────
-RegisterNUICallback('closeHUD', function(_, cb)
-    cb('ok')
-    closeHUD()
-end)
-
-RegisterNUICallback('waterPlant', function(data, cb)
-    cb('ok')
-    local pid = tonumber(data.plantId)
-    CreateThread(function() doWater(pid) end)
 end)
 
 RegisterNUICallback('fertilizePlant', function(data, cb)
     cb('ok')
-    local pid = tonumber(data.plantId)
-    CreateThread(function() doFertilize(pid) end)
+    closeNUI()
+    local plantId = tonumber(data.plantId)
+    local animCfg = Config.Animations.fertilize
+
+    exports['AX_ProgressBar']:Progress({
+        duration = animCfg.duration,
+        label    = animCfg.label,
+        useWhileDead   = false,
+        canCancel      = true,
+        controlDisables = {
+            disableMovement    = true,
+            disableCarMovement = true,
+            disableMouse       = false,
+            disableCombat      = true,
+        },
+        animation = {
+            animDict = animCfg.animDict,
+            anim     = animCfg.anim,
+            flags    = animCfg.flags,
+        },
+    }, function(cancelled)
+        if not cancelled then
+            TriggerServerEvent('AX_Farming:server:fertilizePlant', plantId)
+        end
+    end)
 end)
 
 RegisterNUICallback('harvestPlant', function(data, cb)
     cb('ok')
-    local pid = tonumber(data.plantId)
-    CreateThread(function() doHarvest(pid) end)
-end)
+    closeNUI()
+    local plantId = tonumber(data.plantId)
+    local animCfg = Config.Animations.harvest
 
-RegisterNUICallback('removePlant', function(data, cb)
-    cb('ok')
-    local pid = tonumber(data.plantId)
-    CreateThread(function() doRemove(pid) end)
-end)
-
--- ── LIMPIEZA ─────────────────────────────────────────────────
-AddEventHandler('onResourceStop', function(resource)
-    if resource ~= GetCurrentResourceName() then return end
-    for _, prop in pairs(spawnedProps) do
-        if DoesEntityExist(prop) then DeleteObject(prop) end
-    end
-    closeHUD()
-end)
-
-AddEventHandler('onClientResourceStart', function(resource)
-    if resource ~= GetCurrentResourceName() then return end
-    CreateThread(function()
-        Wait(3000)
-        local serverPlants = lib.callback.await('AX_Farming:getAllPlants', false)
-        if serverPlants then syncPlants(serverPlants) end
+    exports['AX_ProgressBar']:Progress({
+        duration = animCfg.duration,
+        label    = animCfg.label,
+        useWhileDead   = false,
+        canCancel      = true,
+        controlDisables = {
+            disableMovement    = true,
+            disableCarMovement = true,
+            disableMouse       = false,
+            disableCombat      = true,
+        },
+        animation = {
+            animDict = animCfg.animDict,
+            anim     = animCfg.anim,
+            flags    = animCfg.flags,
+        },
+    }, function(cancelled)
+        if not cancelled then
+            TriggerServerEvent('AX_Farming:server:harvestPlant', plantId)
+        end
     end)
+end)
+
+RegisterNUICallback('destroyPlantMenu', function(data, cb)
+    cb('ok')
+    closeNUI()
+    local plantId = tonumber(data.plantId)
+    destroyPlantAction(plantId)
+end)
+
+-- =============================================
+--  DESTRUIR PLANTA (desde ox_target)
+-- =============================================
+
+function destroyPlantAction(plantId)
+    local animCfg = Config.Animations.destroy
+
+    exports['AX_ProgressBar']:Progress({
+        duration = animCfg.duration,
+        label    = animCfg.label,
+        useWhileDead   = false,
+        canCancel      = true,
+        controlDisables = {
+            disableMovement    = true,
+            disableCarMovement = true,
+            disableMouse       = false,
+            disableCombat      = true,
+        },
+        animation = {
+            animDict = animCfg.animDict,
+            anim     = animCfg.anim,
+            flags    = animCfg.flags,
+        },
+    }, function(cancelled)
+        if not cancelled then
+            TriggerServerEvent('AX_Farming:server:destroyPlant', plantId)
+        end
+    end)
+end
+
+-- =============================================
+--  DETECCIÓN DE SUELO Y PLANTADO
+-- =============================================
+
+local function isOnDirt()
+    local playerPed = PlayerPedId()
+    local pos = GetEntityCoords(playerPed)
+
+    local rayHandle = StartShapeTestRay(
+        pos.x, pos.y, pos.z + 0.5,
+        pos.x, pos.y, pos.z - 2.0,
+        1, playerPed, 7
+    )
+
+    local timeout = 0
+    while timeout < 10 do
+        local status, hit, hitCoords, surfaceNormal, entityHit = GetShapeTestResult(rayHandle)
+        if status ~= 1 then
+            if hit == 1 and entityHit == 0 then
+                -- Verificar material del suelo
+                local materialHash = GetMaterialKeyForSurface(GetGroundMaterialAtCoords(hitCoords.x, hitCoords.y, hitCoords.z))
+                return true -- suelo nativo encontrado
+            end
+            return false
+        end
+        Wait(50)
+        timeout = timeout + 1
+    end
+    return false
+end
+
+local function isNearOtherPlant(coords)
+    for _, plant in pairs(Plants) do
+        local dist = #(vector3(plant.x, plant.y, plant.z) - coords)
+        if dist < Config.MinPlantDistance then
+            return true
+        end
+    end
+    return false
+end
+
+-- =============================================
+--  USAR SEMILLA (ITEM)
+-- =============================================
+
+local function useSeed(seedItem)
+    if PlantingActive then return end
+
+    -- Verificar suelo
+    if not isOnDirt() then
+        TriggerEvent('esx:showNotification', 'Solo puedes plantar en tierra.')
+        return
+    end
+
+    local playerPed = PlayerPedId()
+    local pos       = GetEntityCoords(playerPed)
+
+    if isNearOtherPlant(pos) then
+        TriggerEvent('esx:showNotification', 'Hay una planta demasiado cerca.')
+        return
+    end
+
+    PlantingActive = true
+    local animCfg  = Config.Animations.plant
+
+    exports['AX_ProgressBar']:Progress({
+        duration = animCfg.duration,
+        label    = animCfg.label,
+        useWhileDead   = false,
+        canCancel      = true,
+        controlDisables = {
+            disableMovement    = true,
+            disableCarMovement = true,
+            disableMouse       = false,
+            disableCombat      = true,
+        },
+        animation = {
+            animDict = animCfg.animDict,
+            anim     = animCfg.anim,
+            flags    = animCfg.flags,
+        },
+    }, function(cancelled)
+        PlantingActive = false
+        if not cancelled then
+            local finalPos = GetEntityCoords(PlayerPedId())
+            local heading  = GetEntityHeading(PlayerPedId())
+            TriggerServerEvent('AX_Farming:server:plantSeed', seedItem, {
+                x = finalPos.x,
+                y = finalPos.y,
+                z = finalPos.z,
+            }, heading)
+        end
+    end)
+end
+
+-- Registrar uso de semillas
+AddEventHandler('onClientResourceStart', function(resourceName)
+    if resourceName ~= GetCurrentResourceName() then return end
+    for seedItem, _ in pairs(Config.Plants) do
+        local item = seedItem
+        exports(item, function(data, slot)
+            exports.ox_inventory:useItem(data, function(result)
+                if result then
+                    useSeed(item)
+                end
+            end)
+        end)
+    end
+end)
+
+RegisterNetEvent('AX_Farming:client:useSeed', function(seedItem)
+    useSeed(seedItem)
+end)
+
+-- =============================================
+--  CERRAR NUI CON ESCAPE
+-- =============================================
+
+CreateThread(function()
+    while true do
+        Wait(0)
+        if NUIOpen and IsControlJustReleased(0, 200) then -- ESC
+            closeNUI()
+        end
+    end
+end)
+
+-- =============================================
+--  RECONECTAR: solicitar plantas al servidor
+-- =============================================
+
+AddEventHandler('onClientResourceStart', function(resourceName)
+    if resourceName == GetCurrentResourceName() then
+        ESX.TriggerServerCallback('AX_Farming:getAllPlants', function(serverPlants)
+            TriggerEvent('AX_Farming:client:loadPlants', serverPlants)
+        end)
+    end
 end)

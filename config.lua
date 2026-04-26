@@ -1,124 +1,173 @@
--- ============================================================
---  AX_Farming | config.lua
---  Sistema de cultivo de vegetales
--- ============================================================
-
 Config = {}
 
--- ─── GENERAL ────────────────────────────────────────────────
-Config.MaxPlantsPerPlayer   = 10        -- Límite de plantas activas por jugador
-Config.MinDistanceBetween   = 2.0       -- Distancia mínima entre plantas (metros)
-Config.InteractionDistance  = 2.0       -- Distancia para que ox_target detecte la planta
-Config.UpdateInterval       = 5         -- Cada cuántos minutos el servidor actualiza las plantas
-Config.RotTimer             = 30        -- Minutos tras estar al 100% sin cosechar para que empiece la pudrición
+-- =============================================
+--  CONFIGURACIÓN GENERAL
+-- =============================================
 
--- ─── ÍTEMS DE INVENTARIO ────────────────────────────────────
-Config.WaterItem        = 'water_bottle'     -- Ítem para regar
-Config.FertilizerItem   = 'fertilizer'       -- Ítem para fertilizar
+-- Distancia mínima entre plantas (en metros)
+Config.MinPlantDistance = 2.0
 
--- ─── VALORES DE AGUA & FERTILIZANTE ─────────────────────────
-Config.WaterPerUse       = 50   -- Cuánto agua da cada riego (0-100)
-Config.FertilizerPerUse  = 75   -- Cuánto fertilizante da cada aplicación (0-100)
+-- Distancia máxima al suelo para plantar (raycast hacia abajo)
+Config.MaxGroundDistance = 2.0
 
--- ─── DECAIMIENTO POR CICLO (cada UpdateInterval minutos) ────
-Config.WaterDecayPerCycle        = 15   -- Agua que baja por ciclo
-Config.FertilizerDecayPerCycle   = 10   -- Fertilizante que baja por ciclo
-Config.HealthDecayNoWater        = 25   -- Salud que pierde si agua = 0 (por ciclo de UpdateInterval minutos)
-Config.GrowthBasePerCycle        = 8    -- Crecimiento base por ciclo
-Config.GrowthBonusFertilizer     = 5    -- Crecimiento extra si tiene fertilizante > 0
-Config.GrowthPenaltyLowWater     = 4    -- Reducción de crecimiento si agua < 20
+-- Intervalo de crecimiento pasivo (en milisegundos) - cada cuanto sube el %
+Config.GrowthInterval = 60000 -- 1 minuto
 
--- ─── SUELO PERMITIDO ─────────────────────────────────────────
--- Materiales de superficie donde se puede plantar
-Config.AllowedGroundMaterials = {
-    [1] = true,   -- DIRT
-    [2] = true,   -- GRASS
-    [3] = true,   -- GRASS_TALL
-    [131] = true, -- MUD
-    [138] = true, -- SAND_COMPACT
-}
+-- Cada cuánto el servidor sincroniza/guarda las plantas en DB (ms)
+Config.SaveInterval = 300000 -- 5 minutos
 
--- ─── PLANTAS ─────────────────────────────────────────────────
--- Puedes agregar más entradas siguiendo la misma estructura.
--- Props: cada planta define 4 props según etapa de crecimiento.
---   stage1 = recién plantada (semilla)
---   stage2 = brote
---   stage3 = creciendo
---   stage4 = cosechable (100%)
--- harvestMin / harvestMax: rango base de ítems cosechados
--- bonusPerFertilizer: ítems extra por cada 10% de fertilizante acumulado
+-- =============================================
+--  SISTEMA DE TIEMPO
+-- =============================================
+
+-- Tiempo para madurar al 100% desde 0% (en segundos) - referencia visual
+-- El crecimiento real lo controla GrowthInterval, esto es solo para calcular
+-- el tiempo estimado que se muestra en el menú
+Config.EstimatedGrowthTime = 3600 -- 1 hora base (se ajusta según agua/fert)
+
+-- Tiempo que tiene la planta al 100% antes de pudrirse (segundos)
+Config.RotTime = 1800 -- 30 minutos para pudrirse si no se cosecha
+
+-- Tiempo que tiene la planta sin agua antes de morir (segundos)
+Config.DeathTime = 600 -- 10 minutos sin agua antes de pudrirse
+
+-- =============================================
+--  PLANTAS
+-- =============================================
 
 Config.Plants = {
-
     ['semilla_tomate'] = {
-        label           = 'Tomate',
-        seedItem        = 'semilla_tomate',
-        harvestItem     = 'tomate',
-        harvestMin      = 2,
-        harvestMax      = 5,
-        bonusPerFert    = 1,
-        growTime        = 40,
+        label          = 'Tomate',
+        seedItem       = 'semilla_tomate',
+        harvestItem    = 'tomate',       -- item que da al cosechar
+        baseHarvest    = 2,              -- cantidad base cosechada
+        maxHarvest     = 6,              -- máximo con 100% fertilizante
+        waterMax       = 100,
+        fertMax        = 6,              -- máximo de fertilizante (1-6)
+        -- Crecimiento pasivo: % por intervalo sin agua ni fertilizante
+        passiveGrowth  = 1,
+        -- Crecimiento al regar: +% extra por riego
+        waterGrowth    = 8,
+        -- Crecimiento al fertilizar: +% extra por fertilización
+        fertGrowth     = 5,
+        -- Agua que consume por intervalo pasivo
+        waterDecay     = 3,
+        -- Props según estado de crecimiento
         props = {
-            stage1 = 'prop_pot_plant_03a',   -- semilla / recien plantada (maceta pequena)
-            stage2 = 'bkr_prop_weed_bud_02a', -- brote (DLC mpbiker, basegame en Online)
-            stage3 = 'prop_weed_01',          -- creciendo
-            stage4 = 'prop_weed_02',          -- cosechable
+            [1] = 'prop_pot_plant_03a',        -- etapa 1: 0-33%   (semilla brotando)
+            [2] = 'prop_weed_01',  -- etapa 2: 34-66%  (planta joven)
+            [3] = 'prop_weed_02',  -- etapa 3: 67-100% (planta madura)
+        },
+        -- Animación de plantado
+        plantAnim = {
+            animDict = 'amb@world_human_gardener_plant@male@idle_a',
+            anim     = 'idle_a',
+            flags    = 1,
         },
     },
-
     ['semilla_zanahoria'] = {
-        label           = 'Zanahoria',
-        seedItem        = 'semilla_zanahoria',
-        harvestItem     = 'zanahoria',
-        harvestMin      = 3,
-        harvestMax      = 6,
-        bonusPerFert    = 1,
-        growTime        = 30,
+        label          = 'Zanahoria',
+        seedItem       = 'semilla_zanahoria',
+        harvestItem    = 'zanahoria',
+        baseHarvest    = 2,
+        maxHarvest     = 6,
+        waterMax       = 100,
+        fertMax        = 6,
+        passiveGrowth  = 1,
+        waterGrowth    = 7,
+        fertGrowth     = 5,
+        waterDecay     = 4,
         props = {
-            stage1 = 'prop_pot_plant_03a',
-            stage2 = 'bkr_prop_weed_bud_pruned_01a',
-            stage3 = 'prop_weed_01',
-            stage4 = 'prop_weed_02',
+            [1] = 'prop_cs_dildo_01',
+            [2] = 'prop_weed_02_small_01a',
+            [3] = 'prop_weed_03_small_01a',
+        },
+        plantAnim = {
+            animDict = 'amb@world_human_gardener_plant@male@idle_a',
+            anim     = 'idle_a',
+            flags    = 1,
         },
     },
-
     ['semilla_maiz'] = {
-        label           = 'Maiz',
-        seedItem        = 'semilla_maiz',
-        harvestItem     = 'maiz',
-        harvestMin      = 4,
-        harvestMax      = 8,
-        bonusPerFert    = 2,
-        growTime        = 60,
+        label          = 'Maíz',
+        seedItem       = 'semilla_maiz',
+        harvestItem    = 'maiz',
+        baseHarvest    = 2,
+        maxHarvest     = 6,
+        waterMax       = 100,
+        fertMax        = 6,
+        passiveGrowth  = 1,
+        waterGrowth    = 6,
+        fertGrowth     = 6,
+        waterDecay     = 3,
         props = {
-            stage1 = 'prop_pot_plant_03a',
-            stage2 = 'bkr_prop_weed_bud_02a',
-            stage3 = 'prop_weed_02',
-            stage4 = 'prop_weed_01',
+            [1] = 'prop_cs_dildo_01',
+            [2] = 'prop_weed_02_small_01a',
+            [3] = 'prop_weed_03_small_01a',
+        },
+        plantAnim = {
+            animDict = 'amb@world_human_gardener_plant@male@idle_a',
+            anim     = 'idle_a',
+            flags    = 1,
         },
     },
 }
 
--- ─── OX_TARGET OPTIONS ───────────────────────────────────────
-Config.TargetOptions = {
+-- =============================================
+--  ANIMACIONES DE ACCIONES
+-- =============================================
+
+Config.Animations = {
     water = {
-        label = 'Regar planta',
-        icon  = 'fa-solid fa-droplet',
+        animDict = 'amb@world_human_gardener_plant@male@idle_a',
+        anim     = 'idle_a',
+        flags    = 1,
+        duration = 4000,
+        label    = 'Regando planta...',
     },
     fertilize = {
-        label = 'Fertilizar planta',
-        icon  = 'fa-solid fa-seedling',
+        animDict = 'missheistdockssetup1clipboard@base',
+        anim     = 'base',
+        flags    = 49,
+        duration = 5000,
+        label    = 'Fertilizando planta...',
     },
     harvest = {
-        label = 'Cosechar planta',
-        icon  = 'fa-solid fa-wheat-awn',
+        animDict = 'amb@world_human_gardener_plant@male@idle_a',
+        anim     = 'idle_a',
+        flags    = 1,
+        duration = 6000,
+        label    = 'Cosechando planta...',
     },
+    plant = {
+        animDict = 'amb@world_human_gardener_plant@male@idle_a',
+        anim     = 'idle_a',
+        flags    = 1,
+        duration = 5000,
+        label    = 'Plantando semilla...',
+    },
+    destroy = {
+        animDict = 'melee@large_wpn@streamed_core',
+        anim     = 'ground_attack_0',
+        flags    = 1,
+        duration = 3000,
+        label    = 'Destruyendo planta...',
+    },
+}
+
+-- =============================================
+--  OX_TARGET
+-- =============================================
+
+Config.TargetDistance = 2.0
+
+Config.TargetOptions = {
     inspect = {
-        label = 'Inspeccionar planta',
-        icon  = 'fa-solid fa-magnifying-glass',
+        label = 'Inspeccionar Planta',
+        icon  = 'fas fa-seedling',
     },
-    remove = {
-        label = 'Arrancar planta',
-        icon  = 'fa-solid fa-trash',
+    destroy = {
+        label = 'Destruir Planta',
+        icon  = 'fas fa-skull',
     },
 }

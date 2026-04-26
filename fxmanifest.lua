@@ -1,9 +1,10 @@
 fx_version 'cerulean'
 game 'gta5'
 lua54 'yes'
-author 'AX_Farming'
+
+name        'AX_Farming'
 description 'Sistema de cultivo de vegetales - VictoryZ'
-version '1.0.0'
+version     '1.0.0'
 
 shared_scripts {
     '@ox_lib/init.lua',
@@ -28,9 +29,10 @@ files {
 }
 
 dependencies {
-    'ox_lib',
+    'es_extended',
+    'oxmysql',
     'ox_inventory',
     'ox_target',
-    'oxmysql',
-    'es_extended',
+    'ox_lib',
+    'AX_ProgressBar',
 }

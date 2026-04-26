@@ -1,258 +1,381 @@
--- ============================================================
---  AX_Farming | server.lua
--- ============================================================
+-- =============================================
+--  AX_Farming - server.lua
+--  New ESX 1.13.4 | oxmysql | ox_inventory | Lua 5.4
+-- =============================================
 
 local ESX = exports['es_extended']:getSharedObject()
 
-local plants = {}
+-- =============================================
+--  CREACIÓN AUTOMÁTICA DE TABLA
+-- =============================================
 
--- ─── ESTADO ──────────────────────────────────────────────────
-local function getPlantState(plant)
-    if plant.health <= 0 then return 'dead' end
-    if plant.growth >= 100 then
-        local rotMax = Config.RotTimer * 60
-        if plant.rotTimer and plant.rotTimer >= rotMax then
-            return 'rotten'
-        elseif plant.rotTimer and plant.rotTimer >= math.floor(rotMax * 0.5) then
-            return 'wilting'
-        end
-        return 'ready'
-    end
-    return 'growing'
+MySQL.ready(function()
+    MySQL.query([[
+        CREATE TABLE IF NOT EXISTS `ax_farming_plants` (
+            `id`         INT          NOT NULL AUTO_INCREMENT,
+            `plant_type` VARCHAR(50)  NOT NULL,
+            `owner`      VARCHAR(60)  NOT NULL DEFAULT 'unknown',
+            `x`          FLOAT        NOT NULL,
+            `y`          FLOAT        NOT NULL,
+            `z`          FLOAT        NOT NULL,
+            `heading`    FLOAT        NOT NULL DEFAULT 0.0,
+            `growth`     FLOAT        NOT NULL DEFAULT 0.0,
+            `water`      FLOAT        NOT NULL DEFAULT 50.0,
+            `fertilizer` INT          NOT NULL DEFAULT 0,
+            `stage`      INT          NOT NULL DEFAULT 1,
+            `is_dead`    TINYINT(1)   NOT NULL DEFAULT 0,
+            `planted_at` INT          NOT NULL DEFAULT 0,
+            `last_water` INT          NOT NULL DEFAULT 0,
+            `created_at` TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (`id`)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+    ]])
+end)
+
+-- =============================================
+--  ESTADO DE PLANTAS EN MEMORIA
+-- =============================================
+
+local Plants = {}       -- [id] = { datos }
+local nextId  = 1       -- fallback si DB tarda
+
+local function getStage(growth)
+    if growth < 34 then return 1
+    elseif growth < 67 then return 2
+    else return 3 end
 end
 
--- ─── CONSTRUIR OBJETO CON LABEL ──────────────────────────────
-local function buildPlantObj(data)
-    local pType = data.plant_type or data.plantType
-    local cfg   = Config.Plants[pType]
-    return {
-        id         = data.id,
-        owner      = data.owner,
-        plantType  = pType,
-        label        = cfg and cfg.label or pType,
-        growTimeSecs = cfg and (cfg.growTime * 60) or 600,  -- segundos totales de crecimiento
-        x          = data.x,
-        y          = data.y,
-        z          = data.z,
-        growth     = data.growth,
-        water      = data.water,
-        fertilizer = data.fertilizer,
-        health     = data.health,
-        state      = data.state,
-        rotTimer   = data.rot_timer  or data.rotTimer  or 0,
-        growTimer  = data.grow_timer or data.growTimer or 0,
-    }
-end
+-- =============================================
+--  CARGAR PLANTAS AL INICIAR
+-- =============================================
 
--- ─── CARGA DB ────────────────────────────────────────────────
-local function loadPlantsFromDB()
-    local rows = MySQL.query.await('SELECT * FROM ax_farming_plants WHERE state != ?', {'dead'})
-    if not rows then return end
+MySQL.ready(function()
+    local rows = MySQL.query.await('SELECT * FROM ax_farming_plants')
     for _, row in ipairs(rows) do
-        plants[row.id] = buildPlantObj(row)
+        Plants[row.id] = {
+            id         = row.id,
+            plant_type = row.plant_type,
+            owner      = row.owner,
+            x          = row.x,
+            y          = row.y,
+            z          = row.z,
+            heading    = row.heading,
+            growth     = row.growth,
+            water      = row.water,
+            fertilizer = row.fertilizer,
+            stage      = row.stage,
+            is_dead    = row.is_dead == 1,
+            planted_at = row.planted_at,
+            last_water = row.last_water,
+        }
     end
-    print(('[AX_Farming] ^2%d plantas cargadas.^0'):format(#rows))
-end
+    print('[AX_Farming] Plantas cargadas desde DB: ' .. #rows)
+    TriggerClientEvent('AX_Farming:client:loadPlants', -1, Plants)
+end)
 
--- ─── CICLO ───────────────────────────────────────────────────
-local function updateCycle()
-    local intervalSecs = Config.UpdateInterval * 60
+-- =============================================
+--  CRECIMIENTO PASIVO (servidor)
+-- =============================================
 
-    for id, plant in pairs(plants) do
-        if plant.state == 'dead' then
-            plants[id] = nil
-        else
-            local state = getPlantState(plant)
+CreateThread(function()
+    while true do
+        Wait(Config.GrowthInterval)
+        local now = os.time()
 
-            if state == 'growing' then
-                plant.growTimer = (plant.growTimer or 0) + intervalSecs
+        for id, plant in pairs(Plants) do
+            local cfg = Config.Plants[plant.plant_type]
+            if cfg and not plant.is_dead then
 
-                local gain = Config.GrowthBasePerCycle
-                if plant.fertilizer > 0 then gain = gain + Config.GrowthBonusFertilizer end
-                if plant.water < 20        then gain = gain - Config.GrowthPenaltyLowWater end
-                if plant.water <= 0        then plant.health = math.max(0, plant.health - Config.HealthDecayNoWater) end
+                -- Tiempo sin agua
+                local timeSinceWater = now - plant.last_water
 
-                plant.growth = math.min(100, math.max(0, plant.growth + gain))
+                if plant.growth >= 100 then
+                    -- Planta madura: verificar si se pudre por tiempo
+                    local timeSinceFullGrowth = now - plant.planted_at
+                    -- Calcular cuando llegó al 100% aproximadamente
+                    -- Usamos last_water como referencia de última actividad
+                    local rotDeadline = plant.last_water + Config.RotTime
+                    if now >= rotDeadline then
+                        -- Planta se pudre
+                        plant.is_dead   = true
+                        plant.growth    = 100
+                        MySQL.update('UPDATE ax_farming_plants SET is_dead=1 WHERE id=?', { id })
+                        TriggerClientEvent('AX_Farming:client:updatePlant', -1, id, {
+                            growth     = plant.growth,
+                            water      = plant.water,
+                            fertilizer = plant.fertilizer,
+                            stage      = plant.stage,
+                            is_dead    = true,
+                        })
+                    end
 
-            elseif state == 'ready' or state == 'wilting' or state == 'rotten' then
-                plant.rotTimer = (plant.rotTimer or 0) + intervalSecs
+                elseif plant.water <= 0 and timeSinceWater >= Config.DeathTime then
+                    -- Sin agua demasiado tiempo: se pudre
+                    plant.is_dead = true
+                    MySQL.update('UPDATE ax_farming_plants SET is_dead=1 WHERE id=?', { id })
+                    TriggerClientEvent('AX_Farming:client:updatePlant', -1, id, {
+                        growth     = plant.growth,
+                        water      = plant.water,
+                        fertilizer = plant.fertilizer,
+                        stage      = plant.stage,
+                        is_dead    = true,
+                    })
 
-                local rotMax  = Config.RotTimer * 60
-                local rotPct  = math.min(1.0, plant.rotTimer / rotMax)
-                local hpDecay = math.floor(rotPct * Config.HealthDecayNoWater)
-                if hpDecay > 0 then
-                    plant.health = math.max(0, plant.health - hpDecay)
+                else
+                    -- Crecimiento normal
+                    if plant.growth < 100 then
+                        local grow = cfg.passiveGrowth
+                        if plant.water > 0 then
+                            grow = grow + (cfg.waterGrowth * 0.1)
+                        end
+                        plant.growth = math.min(100, plant.growth + grow)
+                        plant.water  = math.max(0, plant.water - cfg.waterDecay)
+                        plant.stage  = getStage(plant.growth)
+
+                        -- Al llegar al 100% guardar timestamp
+                        if plant.growth >= 100 then
+                            plant.last_water = now
+                            MySQL.update('UPDATE ax_farming_plants SET last_water=? WHERE id=?', { now, id })
+                        end
+                    end
+
+                    TriggerClientEvent('AX_Farming:client:updatePlant', -1, id, {
+                        growth     = plant.growth,
+                        water      = plant.water,
+                        fertilizer = plant.fertilizer,
+                        stage      = plant.stage,
+                        is_dead    = false,
+                    })
                 end
             end
+        end
+    end
+end)
 
-            plant.water      = math.max(0, plant.water      - Config.WaterDecayPerCycle)
-            plant.fertilizer = math.max(0, plant.fertilizer - Config.FertilizerDecayPerCycle)
-            plant.state      = getPlantState(plant)
+-- =============================================
+--  GUARDADO PERIÓDICO EN DB
+-- =============================================
 
+CreateThread(function()
+    while true do
+        Wait(Config.SaveInterval)
+        for id, plant in pairs(Plants) do
             MySQL.update(
-                'UPDATE ax_farming_plants SET growth=?,water=?,fertilizer=?,health=?,state=?,rot_timer=?,grow_timer=? WHERE id=?',
-                {plant.growth, plant.water, plant.fertilizer, plant.health, plant.state, plant.rotTimer or 0, plant.growTimer or 0, plant.id}
+                'UPDATE ax_farming_plants SET growth=?, water=?, fertilizer=?, stage=? WHERE id=?',
+                { plant.growth, plant.water, plant.fertilizer, plant.stage, id }
             )
         end
     end
-
-    TriggerClientEvent('AX_Farming:syncAllPlants', -1, plants)
-end
-
-CreateThread(function()
-    Wait(2000)
-    loadPlantsFromDB()
-    Wait(500)
-    TriggerClientEvent('AX_Farming:syncAllPlants', -1, plants)
-    while true do
-        Wait(Config.UpdateInterval * 60 * 1000)
-        updateCycle()
-    end
 end)
 
--- ─── CALLBACKS ───────────────────────────────────────────────
+-- =============================================
+--  EVENTO: PLANTAR SEMILLA
+-- =============================================
 
-lib.callback.register('AX_Farming:getAllPlants', function(source)
-    return plants
-end)
+RegisterNetEvent('AX_Farming:server:plantSeed', function(seedItem, coords, heading)
+    local src = source
+    local xPlayer = ESX.GetPlayerFromId(src)
+    if not xPlayer then return end
 
-lib.callback.register('AX_Farming:getPlantData', function(source, plantId)
-    return plants[plantId] or nil
-end)
+    local cfg = Config.Plants[seedItem]
+    if not cfg then return end
 
-lib.callback.register('AX_Farming:plantSeed', function(source, plantType, coords)
-    local xPlayer = ESX.GetPlayerFromId(source)
-    if not xPlayer then return false, 'Sin jugador' end
-
-    local identifier = xPlayer.identifier
-    local cfg = Config.Plants[plantType]
-    if not cfg then return false, 'Tipo de planta invalido' end
-
-    local count = 0
-    for _, p in pairs(plants) do
-        if p.owner == identifier then count = count + 1 end
-    end
-    if count >= Config.MaxPlantsPerPlayer then
-        return false, ('Limite de %d plantas alcanzado'):format(Config.MaxPlantsPerPlayer)
+    local hasItem = exports.ox_inventory:GetItem(src, seedItem, nil, false)
+    if not hasItem or hasItem.count < 1 then
+        TriggerClientEvent('esx:showNotification', src, 'No tienes esa semilla.')
+        return
     end
 
-    for _, p in pairs(plants) do
-        local dist = #(vector3(coords.x, coords.y, coords.z) - vector3(p.x, p.y, p.z))
-        if dist < Config.MinDistanceBetween then
-            return false, 'Demasiado cerca de otra planta'
+    for _, plant in pairs(Plants) do
+        local dist = #(vector3(plant.x, plant.y, plant.z) - vector3(coords.x, coords.y, coords.z))
+        if dist < Config.MinPlantDistance then
+            TriggerClientEvent('esx:showNotification', src, 'Hay una planta demasiado cerca.')
+            return
         end
     end
 
-    local removed = exports.ox_inventory:RemoveItem(source, cfg.seedItem, 1)
-    if not removed then return false, 'No tienes la semilla en el inventario' end
+    exports.ox_inventory:RemoveItem(src, seedItem, 1)
 
-    local insertId = MySQL.insert.await(
-        'INSERT INTO ax_farming_plants (owner,plant_type,x,y,z,growth,water,fertilizer,health,state,rot_timer,grow_timer,planted_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,NOW())',
-        {identifier, plantType, coords.x, coords.y, coords.z, 0, 50, 0, 100, 'growing', 0, 0}
+    local now = os.time()
+    local id = MySQL.insert.await(
+        'INSERT INTO ax_farming_plants (plant_type, owner, x, y, z, heading, growth, water, fertilizer, stage, is_dead, planted_at, last_water) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)',
+        { seedItem, xPlayer.identifier, coords.x, coords.y, coords.z, heading, 0.0, 50.0, 0, 1, 0, now, now }
     )
-    if not insertId then return false, 'Error en base de datos' end
 
-    plants[insertId] = {
-        id           = insertId,
-        owner        = identifier,
-        plantType    = plantType,
-        label        = cfg.label,
-        growTimeSecs = cfg.growTime * 60,
-        x            = coords.x,
-        y            = coords.y,
-        z            = coords.z,
-        growth       = 0,
-        water        = 50,
-        fertilizer   = 0,
-        health       = 100,
-        state        = 'growing',
-        rotTimer     = 0,
-        growTimer    = 0,
+    local plantData = {
+        id         = id,
+        plant_type = seedItem,
+        owner      = xPlayer.identifier,
+        x          = coords.x,
+        y          = coords.y,
+        z          = coords.z,
+        heading    = heading,
+        growth     = 0.0,
+        water      = 50.0,
+        fertilizer = 0,
+        stage      = 1,
+        is_dead    = false,
+        planted_at = now,
+        last_water = now,
     }
+    Plants[id] = plantData
 
-    TriggerClientEvent('AX_Farming:syncAllPlants', -1, plants)
-    return true, insertId
+    TriggerClientEvent('AX_Farming:client:addPlant', -1, plantData)
+    TriggerClientEvent('esx:showNotification', src, 'Semilla plantada con éxito.')
 end)
 
-lib.callback.register('AX_Farming:waterPlant', function(source, plantId)
-    local xPlayer = ESX.GetPlayerFromId(source)
-    if not xPlayer then return false, 'Sin jugador' end
-    local plant = plants[plantId]
-    if not plant then return false, 'Planta no encontrada' end
-    if plant.state == 'dead' or plant.state == 'rotten' then return false, 'No se puede regar' end
-    local removed = exports.ox_inventory:RemoveItem(source, Config.WaterItem, 1)
-    if not removed then return false, 'No tienes agua en el inventario' end
-    plant.water = math.min(100, plant.water + Config.WaterPerUse)
-    MySQL.update('UPDATE ax_farming_plants SET water=? WHERE id=?', {plant.water, plantId})
-    TriggerClientEvent('AX_Farming:syncAllPlants', -1, plants)
-    return true, plant
-end)
+-- =============================================
+--  EVENTO: REGAR PLANTA
+-- =============================================
 
-lib.callback.register('AX_Farming:fertilizePlant', function(source, plantId)
-    local xPlayer = ESX.GetPlayerFromId(source)
-    if not xPlayer then return false, 'Sin jugador' end
-    local plant = plants[plantId]
-    if not plant then return false, 'Planta no encontrada' end
-    if plant.state == 'dead' or plant.state == 'rotten' then return false, 'No se puede fertilizar' end
-    local removed = exports.ox_inventory:RemoveItem(source, Config.FertilizerItem, 1)
-    if not removed then return false, 'No tienes fertilizante en el inventario' end
-    plant.fertilizer = math.min(100, plant.fertilizer + Config.FertilizerPerUse)
-    MySQL.update('UPDATE ax_farming_plants SET fertilizer=? WHERE id=?', {plant.fertilizer, plantId})
-    TriggerClientEvent('AX_Farming:syncAllPlants', -1, plants)
-    return true, plant
-end)
+RegisterNetEvent('AX_Farming:server:waterPlant', function(plantId)
+    local src = source
+    local plant = Plants[plantId]
+    if not plant then return end
 
-lib.callback.register('AX_Farming:harvestPlant', function(source, plantId)
-    local xPlayer = ESX.GetPlayerFromId(source)
-    if not xPlayer then return false, 'Sin jugador' end
-    local plant = plants[plantId]
-    if not plant then return false, 'Planta no encontrada' end
-    local state = getPlantState(plant)
-    if state ~= 'ready' and state ~= 'wilting' and state ~= 'rotten' then
-        return false, 'La planta aun no esta lista para cosechar'
+    if plant.is_dead then
+        TriggerClientEvent('esx:showNotification', src, 'Esta planta está muerta, solo puedes destruirla.')
+        return
     end
-    local cfg = Config.Plants[plant.plantType]
-    if not cfg then return false, 'Tipo invalido' end
 
-    local amount = math.random(cfg.harvestMin, cfg.harvestMax)
-    if plant.growth >= 100 and plant.fertilizer >= 50 then
-        amount = amount + cfg.bonusPerFert
+    local hasItem = exports.ox_inventory:GetItem(src, 'water_bottle', nil, false)
+    if not hasItem or hasItem.count < 1 then
+        TriggerClientEvent('esx:showNotification', src, 'Necesitas una botella de agua.')
+        return
     end
-    if state == 'wilting' then amount = math.floor(amount * 0.6)
-    elseif state == 'rotten' then amount = math.floor(amount * 0.2) end
-    if plant.health < 50 then amount = math.floor(amount * (plant.health / 100)) end
-    amount = math.max(1, amount)
 
-    exports.ox_inventory:AddItem(source, cfg.harvestItem, amount)
-    plants[plantId] = nil
-    MySQL.update('UPDATE ax_farming_plants SET state=? WHERE id=?', {'dead', plantId})
-    TriggerClientEvent('AX_Farming:removePlant', -1, plantId)
-    return true, {amount = amount, item = cfg.harvestItem, label = cfg.label}
+    local cfg = Config.Plants[plant.plant_type]
+    if not cfg then return end
+
+    exports.ox_inventory:RemoveItem(src, 'water_bottle', 1)
+
+    local now = os.time()
+    plant.water      = math.min(cfg.waterMax, plant.water + 30)
+    plant.growth     = math.min(100, plant.growth + cfg.waterGrowth)
+    plant.stage      = getStage(plant.growth)
+    plant.last_water = now
+
+    MySQL.update(
+        'UPDATE ax_farming_plants SET growth=?, water=?, stage=?, last_water=? WHERE id=?',
+        { plant.growth, plant.water, plant.stage, now, plantId }
+    )
+
+    TriggerClientEvent('AX_Farming:client:updatePlant', -1, plantId, {
+        growth     = plant.growth,
+        water      = plant.water,
+        fertilizer = plant.fertilizer,
+        stage      = plant.stage,
+        is_dead    = false,
+    })
+    TriggerClientEvent('esx:showNotification', src, 'Planta regada.')
 end)
 
-lib.callback.register('AX_Farming:removePlant', function(source, plantId)
-    local xPlayer = ESX.GetPlayerFromId(source)
-    if not xPlayer then return false end
-    local plant = plants[plantId]
-    if not plant then return false end
-    if plant.owner ~= xPlayer.identifier then return false, 'No eres el dueno' end
-    plants[plantId] = nil
-    MySQL.update('UPDATE ax_farming_plants SET state=? WHERE id=?', {'dead', plantId})
-    TriggerClientEvent('AX_Farming:removePlant', -1, plantId)
-    return true
-end)
+-- =============================================
+--  EVENTO: FERTILIZAR PLANTA
+-- =============================================
 
-AddEventHandler('esx:playerLoaded', function(playerId)
-    Wait(3000)
-    TriggerClientEvent('AX_Farming:syncAllPlants', playerId, plants)
-end)
+RegisterNetEvent('AX_Farming:server:fertilizePlant', function(plantId)
+    local src = source
+    local plant = Plants[plantId]
+    if not plant then return end
 
-CreateThread(function()
-    Wait(1000)
-    for itemName, _ in pairs(Config.Plants) do
-        ESX.RegisterUsableItem(itemName, function(source)
-            TriggerClientEvent('AX_Farming:useSeed', source, itemName)
-        end)
+    local cfg = Config.Plants[plant.plant_type]
+    if not cfg then return end
+
+    if plant.fertilizer >= cfg.fertMax then
+        TriggerClientEvent('esx:showNotification', src, 'La planta ya tiene el fertilizante máximo.')
+        return
     end
-    print('[AX_Farming] ^2Semillas registradas como usables.^0')
+
+    -- Verificar fertilizante
+    local hasItem = exports.ox_inventory:GetItem(src, 'fertilizer', nil, false)
+    if not hasItem or hasItem.count < 1 then
+        TriggerClientEvent('esx:showNotification', src, 'Necesitas fertilizante.')
+        return
+    end
+
+    exports.ox_inventory:RemoveItem(src, 'fertilizer', 1)
+
+    plant.fertilizer = math.min(cfg.fertMax, plant.fertilizer + 2)
+    plant.growth     = math.min(100, plant.growth + cfg.fertGrowth)
+    plant.stage      = getStage(plant.growth)
+
+    MySQL.update(
+        'UPDATE ax_farming_plants SET growth=?, fertilizer=?, stage=? WHERE id=?',
+        { plant.growth, plant.fertilizer, plant.stage, plantId }
+    )
+
+    TriggerClientEvent('AX_Farming:client:updatePlant', -1, plantId, {
+        growth     = plant.growth,
+        water      = plant.water,
+        fertilizer = plant.fertilizer,
+        stage      = plant.stage,
+    })
+    TriggerClientEvent('esx:showNotification', src, 'Planta fertilizada. (' .. plant.fertilizer .. '/' .. cfg.fertMax .. ')')
 end)
+
+-- =============================================
+--  EVENTO: COSECHAR PLANTA
+-- =============================================
+
+RegisterNetEvent('AX_Farming:server:harvestPlant', function(plantId)
+    local src = source
+    local plant = Plants[plantId]
+    if not plant then return end
+
+    local cfg = Config.Plants[plant.plant_type]
+    if not cfg then return end
+
+    if plant.growth < 100 then
+        TriggerClientEvent('esx:showNotification', src, 'La planta aún no está lista.')
+        return
+    end
+
+    -- Calcular cosecha: base + extra por fertilizante
+    local fertPercent = (plant.fertilizer / cfg.fertMax)
+    local extraHarvest = math.floor((cfg.maxHarvest - cfg.baseHarvest) * fertPercent)
+    local totalHarvest = cfg.baseHarvest + extraHarvest
+
+    exports.ox_inventory:AddItem(src, cfg.harvestItem, totalHarvest)
+
+    -- Eliminar planta
+    MySQL.query('DELETE FROM ax_farming_plants WHERE id=?', { plantId })
+    Plants[plantId] = nil
+
+    TriggerClientEvent('AX_Farming:client:removePlant', -1, plantId)
+    TriggerClientEvent('esx:showNotification', src, 'Cosechaste ' .. totalHarvest .. 'x ' .. cfg.harvestItem .. '.')
+end)
+
+-- =============================================
+--  EVENTO: DESTRUIR PLANTA
+-- =============================================
+
+RegisterNetEvent('AX_Farming:server:destroyPlant', function(plantId)
+    local src = source
+    local plant = Plants[plantId]
+    if not plant then return end
+
+    MySQL.query('DELETE FROM ax_farming_plants WHERE id=?', { plantId })
+    Plants[plantId] = nil
+
+    TriggerClientEvent('AX_Farming:client:removePlant', -1, plantId)
+    TriggerClientEvent('esx:showNotification', src, 'Planta destruida.')
+end)
+
+-- =============================================
+--  CALLBACK: OBTENER DATOS DE UNA PLANTA
+-- =============================================
+
+ESX.RegisterServerCallback('AX_Farming:getPlantData', function(source, cb, plantId)
+    local plant = Plants[plantId]
+    cb(plant)
+end)
+
+-- =============================================
+--  CALLBACK: VERIFICAR SUELO (desde cliente)
+-- =============================================
+
+ESX.RegisterServerCallback('AX_Farming:getAllPlants', function(source, cb)
+    cb(Plants)
+end)
+
